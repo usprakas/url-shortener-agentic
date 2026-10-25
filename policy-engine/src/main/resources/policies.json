@@ -1,1 +1,19 @@
-{"rules":["no-secrets","allowed-paths","tests-required","security-review-required","high-risk-approval"]}
+{
+  "rules": [
+    "no-secrets",
+    "allowed-paths",
+    "tests-required",
+    "security-review-required",
+    "high-risk-approval",
+    "disallowed-dependency"
+  ],
+  "allowedPathPrefixes": [
+    "shortener-service/",
+    "docs/",
+    "scenarios/"
+  ],
+  "disallowedDependencies": [
+    "log4j-core:2.14.1",
+    "struts2-core:2.3.0"
+  ]
+}
