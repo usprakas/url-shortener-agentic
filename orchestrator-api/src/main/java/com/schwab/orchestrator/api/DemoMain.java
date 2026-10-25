@@ -1,33 +1,107 @@
 package com.schwab.orchestrator.api;
 
-import com.schwab.agents.AgentRuntime;
-import com.schwab.agents.AgentRuntime.Role;
-import com.schwab.orchestrator.engine.*;
-import com.schwab.orchestrator.model.*;
+import com.schwab.orchestrator.engine.ApprovalProvider;
+import com.schwab.orchestrator.engine.KillSwitch;
+import com.schwab.orchestrator.engine.OrchestrationEngine;
+import com.schwab.orchestrator.model.RunSnapshot;
+import com.schwab.orchestrator.model.WorkflowPlan;
 import com.schwab.orchestrator.persistence.FileAuditStore;
 import com.schwab.policy.PolicyEngine;
-import java.nio.file.*;
-import java.time.*;
-import java.util.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 
-/** Non-interactive, reproducible runner for the three assessment scenarios. */
+/**
+ * Non-interactive, reproducible runner for the three assessment scenarios. Each run id is
+ * timestamped so repeated invocations never append to a stale audit file from an earlier run.
+ */
 public final class DemoMain {
-  public static void main(String[] args) throws Exception { Path output = Path.of("artifacts"); Files.createDirectories(output); List<String> rows = new ArrayList<>(); rows.add("# Demo results\n"); rows.add(run("greenfield", "Build shorten and redirect service", output, false)); rows.add(run("brownfield", "Add link expiry; re-plan impacted implementation/test/docs/security/release nodes", output, true)); rows.add(run("ambiguous", "Make links safer; assumptions: HTTP(S) only, deny localhost/private IPs, security approval required", output, false)); Files.writeString(output.resolve("demo-report.md"), String.join("\n", rows)); System.out.println(String.join("\n", rows)); }
-  private static String run(String name, String requirement, Path output, boolean replan) {
-    PolicyEngine.Result policy = new PolicyEngine().evaluate(new PolicyEngine.Evidence(Set.of("shortener-service/", "docs/", "scenarios/"), "", true, true, true, true));
-    FileAuditStore audit = new FileAuditStore(output.resolve("audit")); ApprovalProvider approvals = (id, stage) -> ApprovalProvider.ApprovalDecision.approve("scripted approval for " + stage.id());
-    OrchestrationEngine engine = new OrchestrationEngine(audit, approvals, new KillSwitch());
-    List<StageDefinition> stages = List.of(
-      AgentRuntime.stage("requirements", Role.REQUIREMENTS_ANALYST, Set.of(), false, "requirements"),
-      AgentRuntime.stage("design", Role.ARCHITECT, Set.of("requirements"), true, "design"),
-      AgentRuntime.stage("implementation", Role.IMPLEMENTER, Set.of("design"), false, "implementation"),
-      AgentRuntime.stage("tests", Role.TEST_ENGINEER, Set.of("design"), false, "tests"),
-      AgentRuntime.stage("docs", Role.DOC_WRITER, Set.of("design"), false, "docs"),
-      AgentRuntime.stage("security", Role.SECURITY_REVIEWER, Set.of("implementation", "tests", "docs"), false, "security"),
-      AgentRuntime.stage("release", Role.RELEASE_MANAGER, Set.of("security"), true, "release"));
-    RunSnapshot result = engine.execute(name + "-1", new WorkflowPlan(stages), Map.of("requirement", requirement));
-    int retries = (int) audit.events(name + "-1").stream().filter(e -> e.eventType().equals("RETRY_SCHEDULED")).count();
-    String replanText = replan ? " Dynamic re-plan demonstrated: requirement hash revision invalidated downstream subgraph [implementation, tests, docs, security, release]; approvals re-required." : "";
-    return "## " + name + "\nStatus: " + result.status() + "; policy: " + (policy.allowed() ? "PASS" : "DENY") + "; audit events: " + audit.events(name + "-1").size() + "; retries: " + retries + "." + replanText;
+
+  public static void main(String[] args) throws Exception {
+    Path output = Path.of("artifacts");
+    Files.createDirectories(output);
+    PolicyEngine policyEngine = new PolicyEngine();
+    FileAuditStore audit = new FileAuditStore(output.resolve("audit"));
+
+    List<ScenarioResult> results = new ArrayList<>();
+    results.add(runGreenfield(policyEngine, audit));
+    results.add(runBrownfieldWithReplan(policyEngine, audit));
+    results.add(runAmbiguous(policyEngine, audit));
+
+    for (ScenarioResult result : results) {
+      Files.writeString(output.resolve(result.run().runId() + ".artifacts.json"), renderArtifacts(result));
+    }
+
+    String report = DemoReport.render(results);
+    Files.writeString(output.resolve("demo-report.md"), report);
+    System.out.println(report);
+  }
+
+  /**
+   * Writes every artifact a scenario actually produced, in full (not just a hash), so a reviewer
+   * can see exactly what each agent stage generated instead of taking the audit trail's word for it.
+   */
+  private static String renderArtifacts(ScenarioResult result) {
+    StringBuilder json = new StringBuilder("{\n");
+    boolean first = true;
+    for (Map.Entry<String, String> entry : new TreeMap<>(result.run().artifacts()).entrySet()) {
+      if (!first) {
+        json.append(",\n");
+      }
+      json.append("  \"").append(escapeJson(entry.getKey())).append("\": \"")
+          .append(escapeJson(entry.getValue())).append('"');
+      first = false;
+    }
+    json.append("\n}\n");
+    return json.toString();
+  }
+
+  private static String escapeJson(String value) {
+    return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+  }
+
+  private static ScenarioResult runGreenfield(PolicyEngine policyEngine, FileAuditStore audit) {
+    String runId = "greenfield-" + Instant.now().toEpochMilli();
+    OrchestrationEngine engine = new OrchestrationEngine(audit, scriptedApproval(), new KillSwitch());
+    WorkflowPlan plan = new WorkflowPlan(Scenarios.greenfield(policyEngine));
+    RunSnapshot run = engine.execute(runId, plan, Map.of("requirement", "Build the core shorten/redirect service."));
+    return ScenarioResult.of("greenfield", run, audit.events(runId), List.of());
+  }
+
+  private static ScenarioResult runBrownfieldWithReplan(PolicyEngine policyEngine, FileAuditStore audit) {
+    String runId = "brownfield-" + Instant.now().toEpochMilli();
+    OrchestrationEngine engine = new OrchestrationEngine(audit, scriptedApproval(), new KillSwitch());
+    WorkflowPlan plan = new WorkflowPlan(Scenarios.brownfield(policyEngine));
+    RunSnapshot run = engine.execute(runId, plan, Map.of("requirement", "Add link expiry to the existing service."));
+
+    RunSnapshot replanned = engine.rePlan(run, plan, "design", Scenarios.BROWNFIELD_REVISED_DESIGN);
+
+    List<String> notes = List.of(
+        "Dynamic re-plan demonstrated: after design was approved once, the design artifact was revised "
+            + "(expiry must also be enforced on redirect, not just create). The engine computed the invalidated "
+            + "downstream subgraph from the dependency DAG -> [design, implementation, tests, docs, security, release], "
+            + "reset exactly those stages to PENDING, re-ran design's approval gate, and re-executed the rest — "
+            + "while 'requirements' and 'impact-analysis' kept their original SUCCEEDED results and artifacts.");
+    return ScenarioResult.of("brownfield", replanned, audit.events(runId), notes);
+  }
+
+  private static ScenarioResult runAmbiguous(PolicyEngine policyEngine, FileAuditStore audit) {
+    String runId = "ambiguous-" + Instant.now().toEpochMilli();
+    OrchestrationEngine engine = new OrchestrationEngine(audit, scriptedApproval(), new KillSwitch());
+    WorkflowPlan plan = new WorkflowPlan(Scenarios.ambiguous(policyEngine));
+    RunSnapshot run = engine.execute(runId, plan, Map.of("requirement", "Make links safer."));
+    List<String> notes = List.of(
+        "The vague input requirement was deliberately left as-is; the 'clarification' stage is what surfaces "
+            + "ambiguity and records assumptions as a real artifact — see the 'clarification' entry in "
+            + "artifacts/audit/" + runId + ".events.jsonl for the exact text produced.");
+    return ScenarioResult.of("ambiguous", run, audit.events(runId), notes);
+  }
+
+  private static ApprovalProvider scriptedApproval() {
+    return (runId, stage) -> ApprovalProvider.ApprovalDecision.approve("scripted approval for " + stage.id());
   }
 }
