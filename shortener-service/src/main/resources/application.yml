@@ -1,0 +1,9 @@
+spring:
+  application.name: shortener-service
+  datasource.url: jdbc:h2:mem:shortener;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+  jpa.hibernate.ddl-auto: validate
+  flyway.enabled: true
+management:
+  endpoint.health.probes.enabled: true
+  endpoints.web.exposure.include: health,info
+server.shutdown: graceful
