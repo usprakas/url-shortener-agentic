@@ -6,14 +6,20 @@ import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.time.*;
 import java.util.*;
+import java.util.concurrent.*;
 
-/** Executes a governed DAG deterministically; parallel scheduling is introduced by the runtime adapter in Phase 3. */
+/** Executes a governed DAG: independent ready nodes run in parallel, then dependent nodes join in the next scheduling round. */
 public final class OrchestrationEngine {
   private final AuditStore audit; private final ApprovalProvider approvals; private final KillSwitch killSwitch;
   public OrchestrationEngine(AuditStore audit, ApprovalProvider approvals, KillSwitch killSwitch) { this.audit = audit; this.approvals = approvals; this.killSwitch = killSwitch; }
   public RunSnapshot execute(String runId, WorkflowPlan plan, Map<String, String> input) {
     RunSnapshot run = new RunSnapshot(runId, plan, input); run.status(RunStatus.RUNNING); event(run, "", "orchestrator", "RUN_STARTED", "run initialized", Map.of());
-    boolean progressed; do { progressed = false; for (StageDefinition stage : plan.stages().values()) { if (run.stage(stage.id()) != StageStatus.PENDING || !dependenciesComplete(stage, run)) continue; progressed = true; if (!executeStage(run, stage, plan)) return run; } } while (progressed);
+    try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      boolean progressed; do { List<StageDefinition> ready = plan.stages().values().stream().filter(stage -> run.stage(stage.id()) == StageStatus.PENDING && dependenciesComplete(stage, run)).toList(); progressed = !ready.isEmpty(); if (!progressed) break;
+        List<Future<Boolean>> outcomes = executor.invokeAll(ready.stream().<Callable<Boolean>>map(stage -> () -> executeStage(run, stage, plan)).toList());
+        for (Future<Boolean> outcome : outcomes) if (!outcome.get()) return run;
+      } while (progressed);
+    } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); run.status(RunStatus.SAFE_STOPPED); event(run, "", "orchestrator", "SAFE_STOPPED", "scheduler interrupted", Map.of()); return run; } catch (ExecutionException execution) { run.status(RunStatus.FAILED); event(run, "", "orchestrator", "RUN_FAILED", execution.getCause().getMessage(), Map.of()); rollback(run, plan); return run; }
     if (run.stages().values().stream().allMatch(value -> value == StageStatus.SUCCEEDED)) { run.status(RunStatus.COMPLETED); event(run, "", "orchestrator", "RUN_COMPLETED", "all DAG stages completed", Map.of()); } else { run.status(RunStatus.FAILED); event(run, "", "orchestrator", "RUN_FAILED", "DAG made no progress", Map.of()); rollback(run, plan); }
     return run;
   }

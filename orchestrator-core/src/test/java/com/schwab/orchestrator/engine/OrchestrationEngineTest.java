@@ -19,6 +19,15 @@ class OrchestrationEngineTest {
     assertEquals(RunStatus.COMPLETED, run.status()); assertEquals(StageStatus.SUCCEEDED, run.stage("design"));
     assertTrue(Files.readString(auditDirectory.resolve("greenfield-1.events.jsonl")).contains("RUN_COMPLETED"));
   }
+  @Test void executesIndependentBranchesInParallelBeforeTheirJoin() {
+    InMemoryAuditStore audit = new InMemoryAuditStore(); AtomicInteger active = new AtomicInteger(); AtomicInteger peak = new AtomicInteger();
+    StageAction branchAction = context -> { int now = active.incrementAndGet(); peak.accumulateAndGet(now, Math::max); Thread.sleep(40); active.decrementAndGet(); return Map.of(context.runId() + UUID.randomUUID(), "done"); };
+    StageDefinition implementation = stage("implementation", Set.of(), branchAction);
+    StageDefinition tests = stage("tests", Set.of(), branchAction);
+    StageDefinition join = stage("release", Set.of("implementation", "tests"), context -> Map.of("release", "ready"));
+    RunSnapshot run = engine(audit, (id, stage) -> ApprovalProvider.ApprovalDecision.approve("approved")).execute("parallel-1", new WorkflowPlan(List.of(implementation, tests, join)), Map.of());
+    assertEquals(RunStatus.COMPLETED, run.status()); assertEquals(2, peak.get()); assertEquals(StageStatus.SUCCEEDED, run.stage("release"));
+  }
   @Test void retriesThenRollsBackAfterRetryExhaustion() {
     InMemoryAuditStore audit = new InMemoryAuditStore(); AtomicInteger attempts = new AtomicInteger(); AtomicInteger rollbacks = new AtomicInteger();
     StageDefinition completed = stage("design", Set.of(), context -> Map.of("design", "ok"));
