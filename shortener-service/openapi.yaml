@@ -1,0 +1,142 @@
+openapi: 3.1.0
+info:
+  title: OpenAPI definition
+  version: v0
+servers:
+- url: http://localhost:8099
+  description: Generated server url
+paths:
+  /api/v1/links:
+    post:
+      tags:
+      - link-controller
+      operationId: create
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateLinkRequest"
+        required: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkResponse"
+  /{code}:
+    get:
+      tags:
+      - link-controller
+      operationId: redirect
+      parameters:
+      - name: code
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+  /api/v1/links/{code}:
+    get:
+      tags:
+      - link-controller
+      operationId: metadata
+      parameters:
+      - name: code
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/LinkResponse"
+    delete:
+      tags:
+      - link-controller
+      operationId: delete
+      parameters:
+      - name: code
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "204":
+          description: No Content
+  /api/v1/links/{code}/stats:
+    get:
+      tags:
+      - link-controller
+      operationId: stats
+      parameters:
+      - name: code
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
+components:
+  schemas:
+    CreateLinkRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          maxLength: 2048
+          minLength: 0
+        alias:
+          type: string
+          maxLength: 12
+          minLength: 0
+        expiresAt:
+          type: string
+          format: date-time
+      required:
+      - url
+    LinkResponse:
+      type: object
+      properties:
+        code:
+          type: string
+        originalUrl:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+    StatsResponse:
+      type: object
+      properties:
+        clickCount:
+          type: integer
+          format: int64
+        timestamps:
+          type: array
+          items:
+            type: string
+            format: date-time
+        referrers:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
